@@ -1,0 +1,119 @@
+{{ config (
+    alias = target.database + '_blended_performance'
+)}}
+
+WITH 
+    paid_data as
+    (SELECT channel, date::date, date_granularity, COALESCE(SUM(spend),0) as spend, COALESCE(SUM(clicks),0) as clicks, COALESCE(SUM(impressions),0) as impressions, 
+        COALESCE(SUM(paid_purchases),0) as paid_purchases, COALESCE(SUM(paid_revenue),0) as paid_revenue, 0 as shopify_total_sales, 0 as shopify_orders,
+    0 as shopify_first_orders, 0 as shopify_subtotal_sales_adj, 0 as shopify_net_sales, 0 as shopify_gross_sales,
+    0 as ga4_sessions, 0 as ga4_sessions_adjusted
+    FROM
+        (SELECT 'Meta' as channel, date, date_granularity, 
+            spend, link_clicks as clicks, impressions, 
+            coalesce(purchases,0)+coalesce(purchases_shared_items,0) as paid_purchases, 
+            coalesce(revenue,0)+coalesce(revenue_shared_items,0) as paid_revenue
+        FROM {{ source('reporting','facebook_campaign_performance') }}
+        WHERE account = 'DTC' and campaign_name !~* 'traffic'
+        UNION ALL
+        SELECT 'Meta with Traffic' as channel, date, date_granularity, 
+            spend, link_clicks as clicks, impressions, 
+            coalesce(purchases,0)+coalesce(purchases_shared_items,0) as paid_purchases, 
+            coalesce(revenue,0)+coalesce(revenue_shared_items,0) as paid_revenue
+        FROM {{ source('reporting','facebook_campaign_performance') }}
+        WHERE account = 'DTC' and campaign_name ~* 'traffic'
+        UNION ALL
+        SELECT 'Meta Sephora' as channel, date, date_granularity, 
+            spend, link_clicks as clicks, impressions, 
+            coalesce(purchases,0)+coalesce(purchases_shared_items,0) as paid_purchases, 
+            coalesce(revenue,0)+coalesce(revenue_shared_items,0) as paid_revenue
+        FROM {{ source('reporting','facebook_campaign_performance') }}
+        WHERE account = 'Sephora'
+        UNION ALL
+        SELECT 'Google Ads' as channel, date, date_granularity,
+            spend, clicks, impressions, purchases as paid_purchases, revenue as paid_revenue
+        FROM {{ source('reporting','googleads_campaign_performance') }}
+        UNION ALL
+        SELECT 'Pinterest' as channel, date, date_granularity,
+            spend, clicks, impressions, purchases as paid_purchases, revenue as paid_revenue
+        FROM {{ source('reporting','pinterest_ad_group_performance') }}
+        UNION ALL
+        SELECT 'Tiktok' as channel, date, date_granularity,
+            spend, clicks, impressions, purchases as paid_purchases, revenue as paid_revenue
+        FROM {{ source('reporting','tiktok_ad_performance') }}
+        WHERE campaign_id != 1861822514294002
+        UNION ALL
+        SELECT 'Tiktok Sephora' as channel, date, date_granularity,
+            spend, clicks, impressions, purchases as paid_purchases, revenue as paid_revenue
+        FROM {{ source('reporting','tiktok_ad_performance') }}
+        WHERE campaign_id = 1861822514294002
+        )
+    GROUP BY channel, date, date_granularity),
+
+sho_data as
+    (SELECT
+            'Shopify' as channel,
+            date,
+            date_granularity,
+            0 as spend,
+            0 as clicks,
+            0 as impressions,
+            0 as paid_purchases,
+            0 as paid_revenue, 
+            total_net_sales as shopify_total_sales, 
+            orders as shopify_orders, 
+            first_orders as shopify_first_orders, 
+            gross_sales - subtotal_discount as shopify_subtotal_sales_adj,
+            net_sales as shopify_net_sales,
+            gross_sales as shopify_gross_sales,
+            0 as ga4_sessions,
+            0 as ga4_sessions_adjusted
+        FROM {{ source('reporting','shopify_sales') }}
+        JOIN sales_adj USING (date,date_granularity)
+        GROUP BY channel, date, date_granularity
+    ),
+
+ga4_data AS (
+        SELECT
+            'GA4' as channel,
+            date,
+            date_granularity,
+            0 as spend,
+            0 as clicks,
+            0 as impressions,
+            0 as paid_purchases,
+            0 as paid_revenue,
+            0 as shopify_total_sales,
+            0 as shopify_orders,
+            0 as shopify_first_orders,
+            0 as shopify_subtotal_sales_adj,
+            0 as shopify_net_sales,
+            0 as shopify_gross_sales,
+            COALESCE(SUM(sessions), 0) as ga4_sessions,
+            -- adjustement needed to better match shopify number that we can't directly pull 
+            0.8*COALESCE(SUM(sessions)) as ga4_sessions_adjusted
+        FROM {{ source('reporting','ga4_performance_by_campaign') }}
+        GROUP BY channel, date, date_granularity
+    )
+    
+SELECT channel,
+    date,
+    date_granularity,
+    spend,
+    clicks,
+    impressions,
+    paid_purchases,
+    paid_revenue,
+    shopify_total_sales,
+    shopify_orders,
+    shopify_first_orders,
+    shopify_subtotal_sales_adj,
+    shopify_net_sales,
+    shopify_gross_sales,
+    ga4_sessions,
+    ga4_sessions_adjusted
+FROM (
+    SELECT * FROM paid_data
+    UNION ALL SELECT * FROM sho_data
+    UNION ALL SELECT * FROM ga4_data
+)
